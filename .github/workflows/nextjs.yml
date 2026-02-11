@@ -1,0 +1,182 @@
+# .github/workflows/next.yml
+name: Deploy Next.js site to Pages
+
+on:
+  push:
+    branches: ["master"]
+  
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  # Variables globales para Material UI y el proyecto
+  NEXT_PUBLIC_BASE_PATH: "/crudqueries"
+  NODE_ENV: "production"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"  # Compatible con Next.js 13.4
+          cache: "npm"
+      
+      - name: Configurar cache de dependencias
+        uses: actions/cache@v3
+        with:
+          path: |
+            node_modules
+            .next/cache
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      
+      # PASO CRÍTICO: Instalar Material UI completo
+      - name: Instalar dependencias de Material UI
+        run: |
+          echo "Instalando dependencias..."
+          npm install
+          
+          # Verificar e instalar Material UI completo
+          echo "Verificando Material UI..."
+          if ! npm list @mui/material 2>/dev/null; then
+            echo "Instalando @mui/material..."
+            npm install @mui/material @emotion/react @emotion/styled --save
+          fi
+          
+          # Ya tienes @mui/icons-material según tu package.json
+          echo "Dependencias instaladas:"
+          npm list --depth=0 | grep -E "(mui|emotion|next|react|axios)"
+      
+      - name: Configurar Next.js para GitHub Pages
+        run: |
+          # Crear o actualizar next.config.js
+          if [ ! -f "next.config.js" ]; then
+            cat > next.config.js << 'EOF'
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'export',
+  basePath: process.env.NODE_ENV === 'production' ? '/crudqueries' : '',
+  images: {
+    unoptimized: true,
+  },
+  trailingSlash: true,
+  compiler: {
+    emotion: true,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+}
+
+module.exports = nextConfig
+EOF
+            echo "✅ next.config.js creado"
+          else
+            echo "⚠️ next.config.js ya existe, verifica su configuración"
+          fi
+          
+          # Crear archivo .env.production
+          echo "NODE_ENV=production" > .env.production
+          echo "NEXT_PUBLIC_BASE_PATH=/crudqueries" >> .env.production
+      
+      - name: Verificar estructura del proyecto
+        run: |
+          echo "Estructura del proyecto:"
+          find . -maxdepth 2 -type f -name "*.json" -o -name "*.js" -o -name "*.ts" -o -name "*.tsx" | sort
+          echo ""
+          echo "Verificando componentes de Material UI..."
+          if find . -name "*.tsx" -o -name "*.jsx" | xargs grep -l "@mui" 2>/dev/null; then
+            echo "✅ Componentes de Material UI encontrados"
+          else
+            echo "⚠️ No se encontraron componentes de Material UI"
+          fi
+      
+      - name: Build del proyecto
+        run: |
+          echo "Ejecutando next build..."
+          npm run build
+          
+          # Verificar que el build fue exitoso
+          if [ -d ".next" ]; then
+            echo "✅ Build exitoso"
+            echo "Tamaño de .next:"
+            du -sh .next/
+          else
+            echo "❌ Error: No se creó la carpeta .next"
+            exit 1
+          fi
+      
+      - name: Exportar sitio estático
+        run: |
+          echo "Exportando sitio estático..."
+          npx next export
+          
+          # Verificar exportación
+          if [ -d "out" ]; then
+            echo "✅ Exportación exitosa"
+            echo "Contenido de 'out':"
+            ls -la out/
+            echo ""
+            echo "Archivos HTML generados:"
+            find out/ -name "*.html" | head -5
+          else
+            echo "⚠️ Creando exportación manualmente..."
+            mkdir -p out
+            cp -r .next/static out/ 2>/dev/null || true
+            cp -r public/* out/ 2>/dev/null || true
+          fi
+      
+      - name: Configurar archivos para GitHub Pages
+        run: |
+          # Asegurar que la carpeta dist existe
+          mkdir -p dist
+          
+          # Mover contenido de out a dist
+          if [ -d "out" ]; then
+            cp -r out/* dist/ 2>/dev/null || true
+          fi
+          
+          # Crear archivos necesarios
+          touch dist/.nojekyll
+          
+          # Copiar index.html como 404.html para SPA
+          if [ -f "dist/index.html" ]; then
+            cp dist/index.html dist/404.html
+            echo "✅ 404.html creado para SPA"
+          fi
+          
+          # Crear CNAME si necesitas dominio personalizado
+          # echo "tudominio.com" > dist/CNAME
+          
+          echo "Archivos en dist/:"
+          ls -la dist/
+      
+      - name: Subir artefacto
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Desplegar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
